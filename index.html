@@ -1687,11 +1687,11 @@
               Segurança & Senha da Conta
             </div>
 
-            <!-- Ver Senha Atual -->
+            <!-- Senha atual (necessária para trocar a senha) -->
             <div class="form-group" style="margin-bottom:10px;">
               <label for="cfg-current-password">Sua Senha Atual</label>
               <div style="position:relative; display:flex; align-items:center;">
-                <input type="password" id="cfg-current-password" class="form-control" readonly style="padding-right:40px; background:#f8fafc; font-weight:600;">
+                <input type="password" id="cfg-current-password" class="form-control" placeholder="Digite a senha atual para trocá-la" autocomplete="current-password" style="padding-right:40px;">
                 <button type="button" onclick="togglePasswordVisibility('cfg-current-password', 'eye-icon-cfg')" style="position:absolute; right:10px; background:none; border:none; color:#64748b; cursor:pointer; padding:4px;" title="Ver ou ocultar senha">
                   <svg id="eye-icon-cfg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
@@ -1699,7 +1699,7 @@
                   </svg>
                 </button>
               </div>
-              <small style="color:var(--text-muted); font-size:0.75rem;">Clique no olho para revelar a senha da sua conta.</small>
+              <small style="color:var(--text-muted); font-size:0.75rem;">Por segurança, a senha fica guardada de forma criptografada e não pode ser exibida.</small>
             </div>
 
             <!-- Alterar Senha -->
@@ -1753,9 +1753,14 @@
   </div>
 
   <script>
-    const TODAY_ISO = "2026-10-10";
-    const USERS_REGISTRY_KEY = "finapp_users_registry";
-    const SESSION_KEY = "finapp_active_session";
+    // Data de hoje (fuso do aparelho), no formato AAAA-MM-DD
+    const TODAY_ISO = (() => {
+      const d = new Date();
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    })();
+    const API_BASE = '';                              // mesma origem do servidor Flask
+    const TOKEN_KEY = "finapp_token";
+    const LEGACY_USERS_KEY = "finapp_users_registry"; // só usado para importar dados da versão antiga
 
     const CATEGORY_COLORS = {
       'Custos fixos': '#6366f1',
@@ -1767,6 +1772,11 @@
 
     let currentUser = null;
     let appData = null;
+    let authToken = null;
+    let serverRevision = 0;
+    let syncTimer = null;
+    let syncInFlight = false;
+    let syncDirty = false;
     let currentCategoryFilter = 'todas';
 
     // Inicialização da Aplicação
@@ -1775,30 +1785,62 @@
     }
 
     // Gerenciamento de Usuários e Sessão
-    function getUsers() {
+    // ---------- Comunicação com o servidor ----------
+    async function api(path, options = {}) {
+      const headers = { 'Content-Type': 'application/json' };
+      if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+      let res;
       try {
-        const u = localStorage.getItem(USERS_REGISTRY_KEY);
-        return u ? JSON.parse(u) : [];
+        res = await fetch(API_BASE + path, { ...options, headers });
       } catch (e) {
-        return [];
+        const err = new Error(location.protocol === 'file:'
+          ? 'Abra o app pelo endereço do servidor (ex.: http://localhost:5000), não direto do arquivo.'
+          : 'Sem conexão com o servidor. Verifique sua internet e tente de novo.');
+        err.network = true;
+        throw err;
       }
+      let data = {};
+      try { data = await res.json(); } catch (e) { /* resposta sem JSON */ }
+      if (!res.ok) {
+        const err = new Error(data.error || ('Erro do servidor (' + res.status + ')'));
+        err.status = res.status;
+        throw err;
+      }
+      return data;
     }
 
-    function saveUsers(users) {
-      localStorage.setItem(USERS_REGISTRY_KEY, JSON.stringify(users));
+    function setToken(token) {
+      authToken = token;
+      localStorage.setItem(TOKEN_KEY, token);
     }
 
-    function checkExistingSession() {
-      const activeUsername = localStorage.getItem(SESSION_KEY);
-      if (activeUsername) {
-        const users = getUsers();
-        const found = users.find(u => u.username.toLowerCase() === activeUsername.toLowerCase());
-        if (found) {
-          loginUserSession(found);
-          return;
+    function clearSession() {
+      clearTimeout(syncTimer);
+      syncDirty = false;
+      authToken = null;
+      currentUser = null;
+      appData = null;
+      serverRevision = 0;
+      localStorage.removeItem(TOKEN_KEY);
+    }
+
+    async function checkExistingSession() {
+      authToken = localStorage.getItem(TOKEN_KEY);
+      if (!authToken) {
+        showAuthScreen();
+        return;
+      }
+      try {
+        const data = await api('/api/data');
+        startSession(data.user, data);
+      } catch (e) {
+        if (e.status === 401) {
+          clearSession();
+        } else {
+          showToast(e.message);   // sem conexão: mantém o login salvo para tentar depois
         }
+        showAuthScreen();
       }
-      showAuthScreen();
     }
 
     function showAuthScreen() {
@@ -1840,7 +1882,7 @@
       }
     }
 
-    function handleRegister(e) {
+    async function handleRegister(e) {
       e.preventDefault();
       const name = document.getElementById('reg-name').value.trim();
       const username = document.getElementById('reg-username').value.trim().toLowerCase();
@@ -1852,66 +1894,55 @@
         return;
       }
 
-      const users = getUsers();
-      if (users.some(u => u.username === username)) {
-        alert("Já existe uma conta cadastrada com esse e-mail ou usuário. Tente fazer login.");
-        return;
+      try {
+        const reg = await api('/api/auth/register', {
+          method: 'POST',
+          body: JSON.stringify({ name, username, password, initial_balance: initialBal })
+        });
+        setToken(reg.token);
+        const data = await api('/api/data');
+        showToast(`Conta de ${name} criada com sucesso!`);
+        startSession(data.user, data);
+        await offerLegacyImport(username, password);
+      } catch (err) {
+        alert(err.message);
       }
-
-      const newUser = {
-        id: 'usr_' + Date.now(),
-        name: name,
-        username: username,
-        password: password, // Armazenado no cofre local do usuário
-        createdAt: new Date().toISOString()
-      };
-
-      users.push(newUser);
-      saveUsers(users);
-
-      // Inicializar banco financeiro exclusivo deste novo usuário
-      const initialData = {
-        balance: initialBal,
-        recurringIncomes: [],
-        fixedCosts: [],
-        transactions: []
-      };
-      localStorage.setItem('finapp_data_' + newUser.id, JSON.stringify(initialData));
-
-      showToast(`Conta de ${name} criada com sucesso!`);
-      loginUserSession(newUser);
     }
 
-    function handleLogin(e) {
+    async function handleLogin(e) {
       e.preventDefault();
       const username = document.getElementById('login-username').value.trim().toLowerCase();
       const password = document.getElementById('login-password').value;
 
-      const users = getUsers();
-      const found = users.find(u => u.username === username);
-
-      if (!found) {
-        alert("Usuário não encontrado. Se ainda não tem uma conta, clique em 'Criar Conta'.");
-        return;
+      try {
+        const res = await api('/api/auth/login', {
+          method: 'POST',
+          body: JSON.stringify({ username, password })
+        });
+        setToken(res.token);
+        const data = await api('/api/data');
+        startSession(data.user, data);
+        await offerLegacyImport(username, password);
+      } catch (err) {
+        alert(err.message);
       }
-
-      if (found.password !== password) {
-        alert("Senha incorreta. Tente novamente.");
-        return;
-      }
-
-      loginUserSession(found);
     }
 
-    function loginUserSession(user) {
+    function applyServerData(data) {
+      appData = {
+        balance: Math.round((Number(data.balance) || 0) * 100) / 100,
+        recurringIncomes: data.recurringIncomes || [],
+        fixedCosts: data.fixedCosts || [],
+        transactions: data.transactions || []
+      };
+      serverRevision = data.revision || 0;
+    }
+
+    function startSession(user, data) {
       currentUser = user;
-      localStorage.setItem(SESSION_KEY, user.username);
+      applyServerData(data);
       document.getElementById('current-user-name').textContent = user.name;
 
-      // Carregar dados exclusivos do usuário
-      loadUserData();
-
-      // Alternar visualização
       document.getElementById('auth-screen').classList.add('hidden');
       document.getElementById('main-app-screen').classList.add('active');
 
@@ -1921,11 +1952,10 @@
       showToast(`Bem-vindo(a), ${user.name}!`);
     }
 
-    function handleLogout() {
+    async function handleLogout() {
       if (confirm("Deseja sair da sua conta?")) {
-        localStorage.removeItem(SESSION_KEY);
-        currentUser = null;
-        appData = null;
+        await flushSync();
+        clearSession();
         document.getElementById('form-login').reset();
         document.getElementById('form-register').reset();
         switchAuthTab('login');
@@ -1933,28 +1963,163 @@
       }
     }
 
-    function loadUserData() {
-      const key = 'finapp_data_' + currentUser.id;
-      const stored = localStorage.getItem(key);
-      if (stored) {
-        try {
-          appData = JSON.parse(stored);
-          if (!appData.recurringIncomes) appData.recurringIncomes = [];
-          if (!appData.fixedCosts) appData.fixedCosts = [];
-          if (!appData.transactions) appData.transactions = [];
-        } catch (e) {
-          appData = { balance: 0, recurringIncomes: [], fixedCosts: [], transactions: [] };
+    function handleSessionExpired() {
+      clearSession();
+      closeModals();
+      showAuthScreen();
+      alert("Sua sessão expirou. Entre novamente.");
+    }
+
+    // ---------- Sincronização automática com o servidor ----------
+    // Todo lugar do app que já chamava saveUserData() continua igual:
+    // agora a função agenda o envio dos dados para o servidor.
+    function saveUserData() {
+      if (!currentUser || !appData) return;
+      syncDirty = true;
+      clearTimeout(syncTimer);
+      syncTimer = setTimeout(runSync, 400);
+    }
+
+    function buildSyncPayload() {
+      // O servidor guarda "saldo inicial" + lançamentos efetivados.
+      // Aqui calculamos o saldo inicial que reproduz exatamente o saldo atual.
+      let settledEffect = 0;
+      appData.transactions.forEach(t => {
+        if (t.isSettled === false) return;
+        settledEffect += t.type === 'receita' ? Number(t.amount) : -Number(t.amount);
+      });
+      return {
+        initial_balance: Math.round((appData.balance - settledEffect) * 100) / 100,
+        revision: serverRevision,
+        transactions: appData.transactions,
+        recurringIncomes: appData.recurringIncomes,
+        fixedCosts: appData.fixedCosts
+      };
+    }
+
+    async function runSync() {
+      if (syncInFlight || !syncDirty || !currentUser || !appData) return;
+      syncInFlight = true;
+      syncDirty = false;
+      let retryDelay = 200;
+      try {
+        const res = await api('/api/sync', { method: 'POST', body: JSON.stringify(buildSyncPayload()) });
+        serverRevision = res.revision;
+      } catch (err) {
+        if (err.status === 401) {
+          syncInFlight = false;
+          handleSessionExpired();
+          return;
+        } else if (err.status === 409) {
+          // Outro aparelho salvou antes: carrega a versão mais nova em vez de sobrescrevê-la
+          syncDirty = false;
+          try {
+            await reloadFromServer();
+            alert("Seus dados foram alterados em outro aparelho. Carregamos a versão mais recente. Se a sua última alteração não aparecer, faça-a novamente.");
+          } catch (e2) { showToast(e2.message); }
+        } else {
+          syncDirty = true;
+          retryDelay = 5000;
+          showToast("Não foi possível salvar na nuvem. Tentando de novo...");
         }
-      } else {
-        appData = { balance: 0, recurringIncomes: [], fixedCosts: [], transactions: [] };
-        saveUserData();
+      } finally {
+        syncInFlight = false;
+        if (syncDirty && currentUser) {
+          clearTimeout(syncTimer);
+          syncTimer = setTimeout(runSync, retryDelay);
+        }
       }
     }
 
-    function saveUserData() {
-      if (!currentUser) return;
-      const key = 'finapp_data_' + currentUser.id;
-      localStorage.setItem(key, JSON.stringify(appData));
+    async function flushSync() {
+      clearTimeout(syncTimer);
+      for (let i = 0; i < 100 && syncInFlight; i++) {
+        await new Promise(r => setTimeout(r, 50));
+      }
+      if (syncDirty) await runSync();
+    }
+
+    async function reloadFromServer() {
+      const data = await api('/api/data');
+      applyServerData(data);
+      processRecurrences(false);
+      renderAll();
+    }
+
+    // Ao voltar para a aba/app, busca alterações feitas em outro aparelho
+    document.addEventListener('visibilitychange', async () => {
+      if (document.visibilityState !== 'visible' || !currentUser || syncDirty || syncInFlight) return;
+      try {
+        const data = await api('/api/data');
+        if (data.revision !== serverRevision && !syncDirty && !syncInFlight) {
+          applyServerData(data);
+          processRecurrences(false);
+          renderAll();
+          showToast("Dados atualizados com as alterações de outro aparelho.");
+        }
+      } catch (e) {
+        if (e.status === 401) handleSessionExpired();
+      }
+    });
+
+    // Fecha a aba com algo pendente: tenta enviar mesmo assim
+    window.addEventListener('pagehide', () => {
+      if (!syncDirty || !currentUser || !appData || !authToken) return;
+      try {
+        fetch(API_BASE + '/api/sync', {
+          method: 'POST',
+          keepalive: true,
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+          body: JSON.stringify(buildSyncPayload())
+        });
+      } catch (e) { /* melhor esforço */ }
+    });
+
+    // ---------- Importação única dos dados da versão antiga (salvos só no navegador) ----------
+    function findLegacyData(username, password) {
+      try {
+        const users = JSON.parse(localStorage.getItem(LEGACY_USERS_KEY) || '[]');
+        const legacyUser = users.find(u => u.username === username && u.password === password);
+        if (!legacyUser) return null;
+        const raw = localStorage.getItem('finapp_data_' + legacyUser.id);
+        if (!raw) return null;
+        return { users, legacyUser, data: JSON.parse(raw) };
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function offerLegacyImport(username, password) {
+      const legacy = findLegacyData(username, password);
+      if (!legacy || !appData) return;
+
+      const d = legacy.data;
+      const legacyTx = Array.isArray(d.transactions) ? d.transactions : [];
+      const legacyInc = Array.isArray(d.recurringIncomes) ? d.recurringIncomes : [];
+      const legacyFc = Array.isArray(d.fixedCosts) ? d.fixedCosts : [];
+      const hasLegacy = legacyTx.length || legacyInc.length || legacyFc.length || Number(d.balance);
+      const serverEmpty = !appData.transactions.length && !appData.recurringIncomes.length && !appData.fixedCosts.length;
+      if (!hasLegacy || !serverEmpty) return;
+
+      if (!confirm("Encontramos dados desta conta salvos somente neste aparelho (versão antiga do app).\n\nDeseja enviá-los para a nuvem para acessá-los de qualquer lugar?")) return;
+
+      appData = {
+        balance: Math.round((Number(d.balance) || 0) * 100) / 100,
+        recurringIncomes: legacyInc,
+        fixedCosts: legacyFc,
+        transactions: legacyTx
+      };
+      syncDirty = true;
+      await flushSync();
+
+      if (!syncDirty && currentUser) {
+        // Enviado com sucesso: remove a cópia antiga (que guardava a senha em texto puro)
+        localStorage.setItem(LEGACY_USERS_KEY, JSON.stringify(legacy.users.filter(u => u.id !== legacy.legacyUser.id)));
+        localStorage.removeItem('finapp_data_' + legacy.legacyUser.id);
+        processRecurrences(false);
+        renderAll();
+        showToast("Seus dados antigos foram enviados para a nuvem!");
+      }
     }
 
     function setupFormDates() {
@@ -2629,7 +2794,7 @@
       if (currentUser) {
         const pwdInput = document.getElementById('cfg-current-password');
         if (pwdInput) {
-          pwdInput.value = currentUser.password || "••••••••";
+          pwdInput.value = "";
           pwdInput.type = "password";
           const icon = document.getElementById('eye-icon-cfg');
           if (icon) {
@@ -2799,47 +2964,30 @@
     }
 
     async function handleChangePassword() {
-      const newPwd = document.getElementById("cfg-new-password").value.trim();
+      const currentPwd = document.getElementById("cfg-current-password").value;
+      const newPwd = document.getElementById("cfg-new-password").value;
+
+      if (!currentPwd) {
+        alert("Digite sua senha atual para poder trocá-la.");
+        return;
+      }
       if (!newPwd || newPwd.length < 4) {
         alert("A nova senha deve ter no mínimo 4 caracteres.");
         return;
       }
 
-      if (typeof IS_API_MODE !== 'undefined' && IS_API_MODE) {
-        try {
-          const res = await fetch("/api/auth/change-password", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ user_id: currentUser.id, new_password: newPwd })
-          });
-          const data = await res.json();
-          if (!res.ok) {
-            alert(data.error || "Erro ao alterar senha.");
-            return;
-          }
-          currentUser.password = newPwd;
-          localStorage.setItem("finapp_saved_user_obj", JSON.stringify(currentUser));
-          document.getElementById("cfg-current-password").value = newPwd;
-          document.getElementById("cfg-new-password").value = "";
-          showToast("Senha alterada com sucesso na nuvem!");
-          return;
-        } catch(err) {
-          alert("Erro de conexão ao alterar senha na nuvem.");
-          return;
-        }
+      try {
+        const res = await api("/api/auth/change-password", {
+          method: "POST",
+          body: JSON.stringify({ current_password: currentPwd, new_password: newPwd })
+        });
+        setToken(res.token);
+        document.getElementById("cfg-current-password").value = "";
+        document.getElementById("cfg-new-password").value = "";
+        showToast("Senha alterada com sucesso!");
+      } catch (err) {
+        alert(err.message);
       }
-
-      currentUser.password = newPwd;
-      const users = getUsers();
-      const idx = users.findIndex(u => u.id === currentUser.id || u.username === currentUser.username);
-      if (idx !== -1) {
-        users[idx].password = newPwd;
-        saveUsers(users);
-      }
-      localStorage.setItem("finapp_saved_user_obj", JSON.stringify(currentUser));
-      document.getElementById("cfg-current-password").value = newPwd;
-      document.getElementById("cfg-new-password").value = "";
-      showToast("Sua senha foi alterada com sucesso!");
     }
 
     function handleSettingsSubmit(e) {

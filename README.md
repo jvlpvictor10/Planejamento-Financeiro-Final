@@ -1,24 +1,47 @@
-# Servidor Backend do App de Planejamento Financeiro
+# App de Planejamento Financeiro (multi-usuário)
 
-Este pacote contém o código de backend completo para transformar o app de planejamento financeiro em um serviço multi-usuário profissional com banco de dados centralizado e autenticação segura de login e senha.
+Backend em Flask + SQLite que guarda contas e lançamentos na nuvem. Entrando com o mesmo
+usuário e senha em qualquer celular ou computador, você vê os mesmos dados.
 
-## Estrutura dos Arquivos:
-- `app.py`: Servidor REST em Python/Flask com rotas de autenticação (hash de senhas), registro, lançamentos e cálculo de saldo.
-- `schema.sql`: Estrutura do banco de dados relacional (SQLite/PostgreSQL) com tabelas de usuários, transações, custos fixos e rendas recorrentes.
-- `requirements.txt`: Dependências necessárias.
+## Como funciona
+- `index.html`: o app. Fala com o servidor pelas rotas `/api/...` (mesmo endereço que serve a página).
+- `app.py`: servidor. Login por token (válido por 30 dias), senhas criptografadas (hash do Werkzeug),
+  cada usuário só acessa os próprios dados.
+- `schema.sql`: tabelas do banco (usuários, lançamentos, custos fixos, rendas recorrentes).
 
-## Como Executar Localmente:
-1. Instale as dependências:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Inicie o servidor:
-   ```bash
-   python app.py
-   ```
-3. O servidor estará ativo em `http://localhost:5000`.
+**Importante:** o app só funciona aberto pelo endereço do servidor (ex.: `http://localhost:5000`
+ou o link da hospedagem). Abrir o `index.html` direto do computador não funciona.
 
-## Como Hospedar Gratuitamente na Nuvem:
-Você pode subir esse projeto para ter um link online permanente onde você, sua namorada e seu pai podem acessar de qualquer lugar:
-- **Render.com** ou **Railway.app**: Crie uma conta gratuita, conecte seu repositório GitHub com estes arquivos e clique em Deploy.
-- As senhas são criptografadas com hash PBKDF2/SHA256 para total privacidade entre as contas.
+## Rodar localmente
+```bash
+pip install -r requirements.txt
+python app.py
+```
+Acesse `http://localhost:5000`. Para testar em outro aparelho da mesma rede Wi-Fi, use
+`http://IP-DO-SEU-PC:5000`.
+
+## Variáveis de ambiente
+| Variável | Para que serve |
+|---|---|
+| `SECRET_KEY` | Chave que assina os logins. Defina um texto longo e aleatório em produção. Se mudar, todos precisam entrar de novo. |
+| `DB_PATH` | Caminho do arquivo do banco (ex.: `/data/database.db`). Aponte para um disco persistente. |
+| `TRUST_PROXY` | Use `1` em hospedagens com proxy (Render, Railway...) para o limite de tentativas de login ver o IP real. |
+| `PORT` | Porta do servidor (a hospedagem costuma definir sozinha). |
+
+## Hospedar online
+Comando de início: `gunicorn app:app`. Comando de build: `pip install -r requirements.txt`.
+
+Atenção ao **disco**: o banco é um arquivo SQLite. Se a hospedagem apaga os arquivos a cada
+deploy ou reinício, todas as contas somem. Confira se o plano tem disco/volume persistente e
+aponte `DB_PATH` para ele (ou use um serviço de hospedagem que mantenha os arquivos).
+Faça backup copiando o arquivo do banco de vez em quando.
+
+## Vários aparelhos na mesma conta
+- Os dados são salvos automaticamente a cada alteração.
+- Ao voltar para o app, ele busca o que foi alterado em outro aparelho.
+- Se dois aparelhos alterarem ao mesmo tempo, o servidor não sobrescreve: o aparelho mais
+  atrasado recebe um aviso e carrega a versão mais nova.
+
+## Dados da versão antiga
+Se o navegador ainda tiver dados da versão antiga (salvos só no aparelho), ao entrar com a mesma
+conta o app oferece enviá-los para a nuvem uma única vez.
