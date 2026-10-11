@@ -172,6 +172,31 @@ def index():
     return send_from_directory(BASE_DIR, 'index.html')
 
 
+# Arquivos públicos do app instalável (PWA). Lista fechada: nada além disso é servido.
+PWA_FILES = {
+    'manifest.webmanifest': 'application/manifest+json',
+    'sw.js': 'application/javascript',
+}
+PWA_ICONS = {'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'apple-touch-icon.png'}
+
+
+@app.route('/manifest.webmanifest')
+@app.route('/sw.js')
+def pwa_file():
+    name = request.path.lstrip('/')
+    resp = send_from_directory(BASE_DIR, name, mimetype=PWA_FILES[name])
+    # Evita que o navegador fique preso a uma versão velha do service worker
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
+
+@app.route('/icons/<name>')
+def pwa_icon(name):
+    if name not in PWA_ICONS:
+        return jsonify({'error': 'Não encontrado'}), 404
+    return send_from_directory(os.path.join(BASE_DIR, 'icons'), name, max_age=86400)
+
+
 @app.route('/api/auth/register', methods=['POST'])
 def register():
     data = request.get_json(silent=True) or {}

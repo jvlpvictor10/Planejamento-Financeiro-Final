@@ -8,9 +8,21 @@ usuário e senha em qualquer celular ou computador, você vê os mesmos dados.
 - `app.py`: servidor. Login por token (válido por 30 dias), senhas criptografadas (hash do Werkzeug),
   cada usuário só acessa os próprios dados.
 - `schema.sql`: tabelas do banco (usuários, lançamentos, custos fixos, rendas recorrentes).
+- `manifest.webmanifest`, `sw.js` e a pasta `icons/`: fazem o app poder ser instalado no celular.
 
 **Importante:** o app só funciona aberto pelo endereço do servidor (ex.: `http://localhost:5000`
 ou o link da hospedagem). Abrir o `index.html` direto do computador não funciona.
+
+## Instalar no celular (ícone na tela inicial)
+O app é um PWA. **Só aparece a opção de instalar quando aberto por `https://`** (o link da
+hospedagem) ou por `localhost`. Por `http://IP-DO-PC:5000` na rede local o navegador não oferece instalar.
+
+- **Android (Chrome):** abra o link do app, toque no menu ⋮ e em **Instalar app** (ou **Adicionar à tela inicial**).
+- **iPhone (Safari):** abra o link, toque em **Compartilhar** e em **Adicionar à Tela de Início**.
+  Precisa ser o Safari.
+
+Sem internet, a tela do app abre, mas as contas e os lançamentos só carregam com conexão,
+porque ficam guardados no servidor. Atualizações do app chegam sozinhas na próxima vez que você abrir com internet.
 
 ## Rodar localmente
 ```bash
